@@ -86,9 +86,7 @@ class PerceptronClassifier:
         """
         Returns a list of the 100 features with the greatest weight for some label
         """
-        featuresWeights = []
-
-        "*** YOUR CODE HERE ***"
-        util.raiseNotDefined()
-
-        return featuresWeights
+        weights = self.weights[label].items()
+        # sorted by decreasing weight, then lexicographically by feature name
+        ranked = sorted(weights, key=lambda kv: (-kv[1], kv[0]))
+        return [feature for feature, _ in ranked[:100]]
