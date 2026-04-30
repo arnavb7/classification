@@ -64,6 +64,76 @@ def basicFeatureExtractorFace(datum):
                 features[(x,y)] = 0
     return features
 
+def _fg_components(grid):
+    # count how many separate ink blobs, all connected by cardinal directions
+    W, H = DIGIT_DATUM_WIDTH, DIGIT_DATUM_HEIGHT
+    seen = [[False] * H for _ in range(W)]
+    n = 0
+    for x in range(W):
+        for y in range(H):
+            if not grid[x][y] or seen[x][y]:
+                continue
+            # when encountering new blob, fill all ink reachable from that pixel by cardinal directions
+            n += 1
+            stack = [(x, y)]
+            seen[x][y] = True
+            while stack:
+                cx, cy = stack.pop()
+                for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+                    if 0 <= nx < W and 0 <= ny < H and grid[nx][ny] and not seen[nx][ny]:
+                        seen[nx][ny] = True
+                        stack.append((nx, ny))
+    return n
+
+def _hole_count(grid):
+    # count how many background regions which can't reach padded border - holes inside loops
+    W, H = DIGIT_DATUM_WIDTH, DIGIT_DATUM_HEIGHT
+    pw, ph = W + 2, H + 2
+    pad = [[False] * ph for _ in range(pw)]
+    for x in range(W):
+        for y in range(H):
+            pad[x + 1][y + 1] = grid[x][y]
+    # mark all pixels that can't reach padded border as outside
+    outside = [[False] * ph for _ in range(pw)]
+
+    stack = []
+    for x in range(pw):
+        for y in range(ph):
+            if (x == 0 or x == pw - 1 or y == 0 or y == ph - 1) and not pad[x][y]:
+                outside[x][y] = True
+                stack.append((x, y))
+    # fill all pixels that can't reach padded border
+    while stack:
+        cx, cy = stack.pop()
+        for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+            if 0 <= nx < pw and 0 <= ny < ph and not pad[nx][ny] and not outside[nx][ny]:
+                outside[nx][ny] = True
+                stack.append((nx, ny))
+
+    holes = 0
+    mark = [[False] * ph for _ in range(pw)]
+    for x in range(pw):
+        for y in range(ph):
+            if pad[x][y] or outside[x][y] or mark[x][y]:
+                continue
+            holes += 1
+            q = [(x, y)]
+            mark[x][y] = True
+            while q:
+                cx, cy = q.pop()
+                for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+                    if (
+                        0 <= nx < pw
+                        and 0 <= ny < ph
+                        and not pad[nx][ny]
+                        and not outside[nx][ny]
+                        and not mark[nx][ny]
+                    ):
+                        mark[nx][ny] = True
+                        q.append((nx, ny))
+    return holes
+
+
 def enhancedFeatureExtractorDigit(datum):
     """
     Your feature extraction playground.
@@ -72,14 +142,130 @@ def enhancedFeatureExtractorDigit(datum):
     for this datum (datum is of type samples.Datum).
 
     ## DESCRIBE YOUR ENHANCED FEATURES HERE...
-
+    # macro: 7x7 grid of 4x4 patches, on if >=2 ink in patch
+    # fine: 14x14 grid of 2x2 patches, on if any ink in patch
+    # _fg_components returns how many 4-connected ink blobs, comp_eq_* / comp_ge_3 turn that into one-hot features
+    # _hole_count returns how many enclosed background holes on padded grid, hole_eq_* / hole_ge_2 same idea
+    # center-of-mass binned into 7 column + 7 row buckets, more ink top vs bottom, left vs right
+    # count left-right vs up-down pixel disagreements, flag if more horizontal edges
+    # total ink binned into 8 tiers, flag if loose mirror checks vs flipped copy
     ##
     """
-    features =  basicFeatureExtractorDigit(datum)
+    features = basicFeatureExtractorDigit(datum)
+    W, H = DIGIT_DATUM_WIDTH, DIGIT_DATUM_HEIGHT
+    # bool grid same rule as basic extractor
+    grid = [[datum.getPixel(x, y) > 0 for y in range(H)] for x in range(W)]
+    for i in range(7):
+        for j in range(7):
+            x0, y0 = i * 4, j * 4
+            ink_here = 0
+            for x in range(x0, x0 + 4):
+                for y in range(y0, y0 + 4):
+                    if grid[x][y]:
+                        ink_here += 1
+            features[("macro", i, j)] = 1 if ink_here >= 2 else 0
 
-    "*** YOUR CODE HERE ***"
-    util.raiseNotDefined()
+    for i in range(14):
+        for j in range(14):
+            ink_here = 0
+            for x in range(2 * i, 2 * i + 2):
+                for y in range(2 * j, 2 * j + 2):
+                    if grid[x][y]:
+                        ink_here += 1
+            features[("fine", i, j)] = 1 if ink_here else 0
 
+    blob_count = _fg_components(grid)
+    features["comp_eq_1"] = 1 if blob_count == 1 else 0
+    features["comp_eq_2"] = 1 if blob_count == 2 else 0
+    features["comp_ge_3"] = 1 if blob_count >= 3 else 0
+
+    hole_count = _hole_count(grid)
+    features["hole_eq_0"] = 1 if hole_count == 0 else 0
+    features["hole_eq_1"] = 1 if hole_count == 1 else 0
+    features["hole_ge_2"] = 1 if hole_count >= 2 else 0
+
+    # check for center of mass and which half has more ink
+    sx = sy = n = 0
+    top = bot = left = right = 0
+    mx, my = (W - 1) / 2.0, (H - 1) / 2.0
+    for x in range(W):
+        for y in range(H):
+            if not grid[x][y]:
+                continue
+            n += 1
+            sx += x
+            sy += y
+            if x < mx:
+                left += 1
+            else:
+                right += 1
+            if y < my:
+                top += 1
+            else:
+                bot += 1
+
+    if n == 0:
+        return features
+
+    # squash center of mass into 7 bins each axis
+    if W > 1:
+        cx = max(0, min(6, int(round(6 * sx / (n * (W - 1))))))
+    else:
+        cx = 3
+    if H > 1:
+        cy = max(0, min(6, int(round(6 * sy / (n * (H - 1))))))
+    else:
+        cy = 3
+    for k in range(7):
+        features[("cx", k)] = 1 if cx == k else 0
+        features[("cy", k)] = 1 if cy == k else 0
+    features["ink_top_gt_bottom"] = 1 if top > bot else 0
+    features["ink_left_gt_right"] = 1 if left > right else 0
+
+    # count neighbor disagreements, compare horizontal vs vertical
+    horiz_flip = 0
+    for x in range(W - 1):
+        for y in range(H):
+            if grid[x][y] != grid[x + 1][y]:
+                horiz_flip += 1
+    vert_flip = 0
+    for x in range(W):
+        for y in range(H - 1):
+            if grid[x][y] != grid[x][y + 1]:
+                vert_flip += 1
+    features["horiz_edges_more"] = 1 if horiz_flip > vert_flip else 0
+
+    # total ink binned into 8 tiers
+    ink_tier = min(7, n // 42)
+    for k in range(8):
+        features[("inktier", k)] = 1 if ink_tier == k else 0
+
+    # count mismatched pixels vs flipped image, flag if symmetric if few enough
+    mism_h = 0
+    for x in range(W // 2):
+        for y in range(H):
+            if grid[x][y] != grid[W - 1 - x][y]:
+                mism_h += 1
+    mism_v = 0
+    for x in range(W):
+        for y in range(H // 2):
+            if grid[x][y] != grid[x][H - 1 - y]:
+                mism_v += 1
+    features["sym_h_loose"] = 1 if mism_h * 4 <= n else 0
+    features["sym_v_loose"] = 1 if mism_v * 4 <= n else 0
+
+    # compare ink more spread horizontally vs vertically around center of mass
+    xc = sx / float(n)
+    yc = sy / float(n)
+    sxx = syy = 0.0
+    for x in range(W):
+        for y in range(H):
+            if not grid[x][y]:
+                continue
+            dx, dy = x - xc, y - yc
+            sxx += dx * dx
+            syy += dy * dy
+    features["scatter_wider_than_tall"] = 1 if sxx > syy else 0
     return features
 
 
