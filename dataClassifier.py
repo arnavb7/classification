@@ -23,6 +23,7 @@ import mira
 import samples
 import sys
 import util
+from game import Directions
 from pacman import GameState
 
 TEST_SET_SIZE = 100
@@ -288,6 +289,34 @@ def basicFeatureExtractorPacman(state):
         features[action] = featureCounter
     return features, state.getLegalActions()
 
+def _maze_dist_closest(start, goal_positions, walls):
+    # bfs to nearest target cell because we can't go through walls
+    if not goal_positions:
+        return 0
+    goal_set = {util.nearestPoint(g) for g in goal_positions}
+    sx, sy = util.nearestPoint(start)
+    if (sx, sy) in goal_set:
+        return 0
+    q = util.Queue()
+    visited = {(sx, sy)}
+    q.push((sx, sy, 0))
+    w, h = walls.width, walls.height
+    while not q.isEmpty():
+        x, y, dist = q.pop()
+        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            nx, ny = x + dx, y + dy
+            if nx < 0 or ny < 0 or nx >= w or ny >= h:
+                continue
+            if walls[nx][ny]:
+                continue
+            if (nx, ny) in goal_set:
+                return dist + 1
+            if (nx, ny) not in visited:
+                visited.add((nx, ny))
+                q.push((nx, ny, dist + 1))
+    return 999
+
+
 def enhancedFeatureExtractorPacman(state):
     """
     Your feature extraction playground.
@@ -309,8 +338,128 @@ def enhancedPacmanFeatures(state, action):
     It should return a counter with { <feature name> : <feature value>, ... }
     """
     features = util.Counter()
-    "*** YOUR CODE HERE ***"
-    util.raiseNotDefined()
+    features["bias"] = 1.0
+
+    successor = state.generateSuccessor(0, action)
+    pos = successor.getPacmanPosition()
+
+    food = successor.getFood()
+    foods = food.asList()
+    walls = successor.getWalls()
+    if foods:
+        closest = min(util.manhattanDistance(pos, f) for f in foods)
+        features["closestFood"] = closest
+        features["invClosestFood"] = 1.0 / (closest + 1)
+        md_food = _maze_dist_closest(pos, foods, walls)
+        features["mazeClosestFood"] = md_food
+        features["invMazeClosestFood"] = 1.0 / (md_food + 1)
+    else:
+        features["closestFood"] = 0
+        features["invClosestFood"] = 1.0
+        features["mazeClosestFood"] = 0
+        features["invMazeClosestFood"] = 1.0
+
+    active_dists, scared_dists = [], []
+    active_positions = []
+    scared_ct = 0
+    for i in range(1, successor.getNumAgents()):
+        st = successor.getGhostState(i)
+        gpos = st.getPosition()
+        d = util.manhattanDistance(pos, gpos)
+        if st.scaredTimer > 0:
+            scared_ct += 1
+            scared_dists.append(d)
+        else:
+            active_dists.append(d)
+            active_positions.append(gpos)
+
+    if active_dists:
+        ma = min(active_dists)
+        features["closestActiveGhost"] = ma
+        features["invClosestActiveGhost"] = 1.0 / (ma + 1)
+        features["activeGhostVeryClose"] = 1 if ma <= 2 else 0
+        mag = _maze_dist_closest(pos, active_positions, walls)
+        features["mazeClosestActive"] = mag
+        features["invMazeClosestActive"] = 1.0 / (mag + 1)
+    else:
+        features["closestActiveGhost"] = 0
+        features["invClosestActiveGhost"] = 0
+        features["activeGhostVeryClose"] = 0
+        features["mazeClosestActive"] = 0
+        features["invMazeClosestActive"] = 0
+
+    if scared_dists:
+        ms = min(scared_dists)
+        features["closestScaredGhost"] = ms
+        features["invClosestScaredGhost"] = 1.0 / (ms + 1)
+    else:
+        features["closestScaredGhost"] = 999
+        features["invClosestScaredGhost"] = 0
+
+    features["numScaredGhosts"] = scared_ct
+
+    caps = successor.getCapsules()
+    features["numCapsules"] = len(caps)
+    if caps:
+        cd = min(util.manhattanDistance(pos, c) for c in caps)
+        features["closestCapsule"] = cd
+        features["invClosestCapsule"] = 1.0 / (cd + 1)
+    else:
+        features["closestCapsule"] = 0
+        features["invClosestCapsule"] = 1.0
+
+    features["scoreDelta"] = successor.getScore() - state.getScore()
+    features["stopped"] = 1 if action == Directions.STOP else 0
+    features["ateFood"] = 1 if state.getNumFood() > successor.getNumFood() else 0
+
+    features["actNorth"] = 1 if action == Directions.NORTH else 0
+    features["actSouth"] = 1 if action == Directions.SOUTH else 0
+    features["actEast"] = 1 if action == Directions.EAST else 0
+    features["actWest"] = 1 if action == Directions.WEST else 0
+    features["actStop"] = 1 if action == Directions.STOP else 0
+
+    old_pos = state.getPacmanPosition()
+
+    # min distance before vs after this move shows whether the step helps towards food or away from ghosts
+    def min_food_dist(s, p):
+        g = s.getFood().asList()
+        if not g:
+            return 0
+        return min(util.manhattanDistance(p, xy) for xy in g)
+
+    def min_active(s, p):
+        ds = []
+        for j in range(1, s.getNumAgents()):
+            st = s.getGhostState(j)
+            if st.scaredTimer > 0:
+                continue
+            ds.append(util.manhattanDistance(p, st.getPosition()))
+        return min(ds) if ds else 999
+
+    d_food_before = min_food_dist(state, old_pos)
+    d_food_after = min_food_dist(successor, pos)
+    features["foodDistDrop"] = d_food_before - d_food_after
+
+    d_act_before = min_active(state, old_pos)
+    d_act_after = min_active(successor, pos)
+    features["activeGhostDistGain"] = d_act_after - d_act_before
+
+    def min_scared(s, p):
+        ds = []
+        for j in range(1, s.getNumAgents()):
+            st = s.getGhostState(j)
+            if st.scaredTimer > 0:
+                ds.append(util.manhattanDistance(p, st.getPosition()))
+        return min(ds) if ds else 999
+
+    d_sc_before = min_scared(state, old_pos)
+    d_sc_after = min_scared(successor, pos)
+    features["scaredGhostCloser"] = d_sc_before - d_sc_after
+
+    fd = features["foodDistDrop"]
+    ag = features["activeGhostDistGain"]
+    features["towardFoodAwayGhost"] = 1 if fd > 0 and ag < 0 else 0
+
     return features
 
 

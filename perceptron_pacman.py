@@ -56,7 +56,7 @@ class PerceptronClassifierPacman(PerceptronClassifier):
                 for a in legalMoves:
                     scores[a] = self.weights * datum[a]
                 y_pred = scores.argMax()
-                # if wrong guess, push weights toward expert action y and away from guessed action
+                # if wrong guess, push weights toward label y and away from guessed action
                 if y_pred != y:
                     self.weights += datum[y]
                     self.weights -= datum[y_pred]
