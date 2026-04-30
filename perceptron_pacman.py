@@ -36,18 +36,27 @@ class PerceptronClassifierPacman(PerceptronClassifier):
         for datum, legalMoves in data:
             vectors = util.Counter()
             for l in legalMoves:
-                vectors[l] = self.weights * datum[l] #changed from datum to datum[l]
+                vectors[l] = self.weights * datum[l]
             guesses.append(vectors.argMax())
         return guesses
 
 
     def train( self, trainingData, trainingLabels, validationData, validationLabels ):
-        self.features = list(trainingData[0][0]['Stop'].keys()) # could be useful later
+        datum0, legal0 = trainingData[0]
+        self.features = list(datum0[legal0[0]].keys())
         # DO NOT ZERO OUT YOUR WEIGHTS BEFORE STARTING TRAINING, OR
         # THE AUTOGRADER WILL LIKELY DEDUCT POINTS.
 
         for iteration in range(self.max_iterations):
             print("Starting iteration ", iteration, "...")
             for i in range(len(trainingData)):
-                "*** YOUR CODE HERE ***"
-                util.raiseNotDefined()
+                datum, legalMoves = trainingData[i]
+                y = trainingLabels[i]
+                scores = util.Counter()
+                for a in legalMoves:
+                    scores[a] = self.weights * datum[a]
+                y_pred = scores.argMax()
+                # if wrong guess, push weights toward expert action y and away from guessed action
+                if y_pred != y:
+                    self.weights += datum[y]
+                    self.weights -= datum[y_pred]
